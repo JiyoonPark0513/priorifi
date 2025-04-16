@@ -1,4 +1,5 @@
-./examples/smart-pixel/data
+.vscode/
+examples/smart-pixel/data
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
