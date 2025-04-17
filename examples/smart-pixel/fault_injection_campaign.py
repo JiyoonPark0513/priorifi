@@ -7,7 +7,9 @@ import numpy as np
 import fkeras as fk
 import pandas as pd
 from tqdm import tqdm
+import tensorflow as tf
 from datetime import datetime
+from fkeras.metrics.hessian import HessianMetrics
 
 import models
 
@@ -70,12 +72,8 @@ def load_model(config, pretrained_model=None):
 
 ###################################################################################################
 
-def gen_smart_pix_0mispredicts_dataset(model):
-    X_train, y_train, X_test, y_test = load_data()
-    assert X_train.shape == (45415, 13)
-    assert X_test.shape == (11113, 13)
-    assert y_train.shape == (45415, 1)
-    assert y_test.shape == (11113, 1)
+def gen_smart_pix_0mispredicts_dataset(model, X_test, y_test):
+    
 
     y_pred_og = model.predict(X_test, verbose=0)
 
@@ -209,6 +207,18 @@ def fic(fic_config):
     range_list = range(*fic_config['fic_range'])
     print(f"Range list: {range_list}")
 
+    # Convert Hessian-ranked parameters into bit index lists
+    wbi_lists = convert_params_into_bit_lists(
+        fic_config["hess_ranking"],
+        layer_precision_info=fic_config["layer_precision_info"],
+        bits_per_weight=fic_config["bit_width"],
+    ) 
+    curr_num_bits_flipped = 0
+    wbi_list_delta_metrics = [[] for _ in range(len(wbi_lists))]
+
+    # TODO: Start here. Need to first call probe_bit_lits()
+
+
     fi_times = list()
     for bit_i in tqdm(range(*fic_config["fic_range"]) ):
         #STEP: Indicate the current bit being flipped in info log
@@ -280,6 +290,62 @@ def fic(fic_config):
 ###################################################################################################
 
 
+def convert_params_into_bit_lists(param_ranking, layer_precision_info=None, bits_per_weight=None):
+    """
+    PrioriFI helper function
+
+    Given a list of parameters, return a list of lists where each list contains
+    the bit indices of the bits in the parameter.
+    List 0 contains the MSBs, List 1 contains the MSB-1s, etc.
+    """
+    if type(layer_precision_info) == list:
+        layer_info_head = 0
+        num_of_params_seen = 0
+        last_bit_idx = -1
+        param_to_bit_indices_dict = dict()
+        # Build a dictionary such that (key, val) = param_index, ([bit_indices])
+        for wi in range(len(param_ranking)):
+            bit_indices_associated_with_param = []
+            bit_width = layer_precision_info[layer_info_head][1]
+            for wbi in range(bit_width):
+                last_bit_idx += 1
+                bit_indices_associated_with_param.append((last_bit_idx, wbi))
+
+            param_to_bit_indices_dict[wi] = bit_indices_associated_with_param
+
+            num_of_params_seen += 1
+            if num_of_params_seen == layer_precision_info[layer_info_head][0]:
+                layer_info_head += 1
+                num_of_params_seen = 0
+
+        # Add the bit indices into the appropriate list based on
+        # the parameter ranking
+        max_bit_width = max(layer_precision_info, key=lambda x: x[1])[1]
+        sorted_msb_lsb_lists = [[] for _ in range(max_bit_width)]
+        for param_idx in param_ranking:
+            for bit_idx, wbi in param_to_bit_indices_dict[param_idx]:
+                sorted_msb_lsb_lists[wbi].append(bit_idx)
+        return sorted_msb_lsb_lists
+    else:
+        print(f"bits_per_weight = {bits_per_weight}")
+        assert type(bits_per_weight) == int
+        # Convert param ranking to bit ranking
+        bit_level_rank = []
+        for param in param_ranking:
+            bit_idx = param * bits_per_weight
+            bit_level_rank.append(bit_idx)
+
+            for j in range(1, bits_per_weight):
+                bit_level_rank.append(bit_idx + j)
+        bit_lists = [] # List of lists of bit indices
+        for i in range(bits_per_weight):
+            bit_group = bit_level_rank[i::bits_per_weight]
+            bit_lists.append(bit_group)
+        return bit_lists 
+
+###################################################################################################
+
+
 def main(args):
     with open(args.config) as f:
         config = yaml.safe_load(f)
@@ -288,9 +354,36 @@ def main(args):
     print(model.summary())
     print()
 
-    #STEP: Load the dataset to be used for evaluation
-    x_test_pred_correct, _ = gen_smart_pix_0mispredicts_dataset(model)
+    # STEP: Load the dataset
+    X_train, y_train, X_test, y_test = load_data()
+    assert X_train.shape == (45415, 13)
+    assert X_test.shape == (11113, 13)
+    assert y_train.shape == (45415, 1)
+    assert y_test.shape == (11113, 1)
 
+    #STEP: Process layer precision info, if any
+    layer_precision_info = None
+    if args.layer_precision_info != None:
+        layer_precision_info = eval(args.layer_precision_info[1:-1])
+
+    #STEP: Compute Hessian parameter ranking
+    hess = HessianMetrics(
+        fic_config["model"], 
+        tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True), 
+        X_test, 
+        y_test,
+        batch_size=1024,
+    )
+        
+    # Hessian model-wide sensitivity ranking
+    eigenvalues, eigenvectors = hess.top_k_eigenvalues(k=8, max_iter=500, rank_BN=False)
+
+    hess_ranking, _ = hess.hessian_ranking_general(
+        eigenvectors, eigenvalues=eigenvalues, k=8,
+    )
+
+    #STEP: Load the dataset to be used for fic evaluation
+    x_test_pred_correct, _ = gen_smart_pix_0mispredicts_dataset(model, X_test, y_test)
 
     #STEP: If needed, update fault injection bit range args to safe defaults
     nmpb = fk.fmodel.FModelAlt(model, incl_biases=True).num_model_param_bits
@@ -309,6 +402,9 @@ def main(args):
         "alert_func": my_alert_func_00,
         "fic_output_dir" : args.fic_output_dir,
         "fic_range" : (args.fic_range_start, args.fic_range_stop, args.fic_range_step),
+        "bit_width" : args.bit_width,
+        "layer_precision_info" : layer_precision_info,
+        "hess_ranking" : hess_ranking,
     }
 
     #STEP: Launch fic
@@ -360,6 +456,17 @@ if __name__ == "__main__":
         type=int, 
         default=None,
         help="specify step size for fault injection campaign range(start, stop, STEP) [Default = 1]"
+    )
+    parser.add_argument(
+        "--bit_width",
+        type=int,
+        help="Bitwidth of the weights and biases (assuming single precision)",
+    )
+    parser.add_argument(
+        "--layer_precision_info",
+        type=str,
+        default=None,
+        help="List of tuples describing precision information for each layer (assuming mixed precision)",
     )
 
     args = parser.parse_args()
