@@ -199,61 +199,48 @@ def fic(fic_config):
     print(f"[fic] Original Model (OM) Metric Value: {metric[0][1]}\n", file=fic_log_info)
     print(f"[fic] Note: OM = Original Model | FM = Faulty Model\n", file=fic_log_info)
     
-
     #STEP: Add latest metric value to result log
     print(metric[-1], file=fic_log)
     
-    print(f"fic_range = {fic_config['fic_range']}")
-    range_list = range(*fic_config['fic_range'])
-    print(f"Range list: {range_list}")
+    # print(f"fic_range = {fic_config['fic_range']}")
+    # range_list = range(*fic_config['fic_range'])
+    # print(f"Range list: {range_list}")
 
     # Convert Hessian-ranked parameters into bit index lists
     wbi_lists = convert_params_into_bit_lists(
         fic_config["hess_ranking"],
         layer_precision_info=fic_config["layer_precision_info"],
         bits_per_weight=fic_config["bit_width"],
-    ) 
-    curr_num_bits_flipped = 0
+    )
     wbi_list_delta_metrics = [[] for _ in range(len(wbi_lists))]
 
-    # TODO: Start here. Need to first call probe_bit_lits()
+    num_bits_flipped = 0
+    #STEP: Update fic_config
+    fic_config["y_pred"] = y_pred
+    fic_config["fmodel"] = fmodel
+    fic_config["metric"] = metric
+    fic_config["fic_log"] = fic_log
+    fic_config["fic_log_info"] = fic_log_info
+    fic_config["alerts"] = alerts
 
+    curr_num_bits_flipped = probe_bit_lists(fic_config, wbi_lists, wbi_list_delta_metrics)
+    num_bits_flipped += curr_num_bits_flipped
 
-    fi_times = list()
-    for bit_i in tqdm(range(*fic_config["fic_range"]) ):
-        #STEP: Indicate the current bit being flipped in info log
-        # print(f"[fic] Injecting bit flip at global-bit-index: {bit_i}\n", file=fic_log_info)
+    while any(len(wbi_list) > 0 for wbi_list in wbi_lists):
+        sensitivity_pointer = compute_sensitivity_pointer(
+            wbi_lists, wbi_list_delta_metrics, fic_config["last_k"],
+        )
+        bit_idx = wbi_lists[sensitivity_pointer][0]
+        delta_metric = flip_bit(fic_config, bit_idx)
+        wbi_list_delta_metrics[sensitivity_pointer].append(delta_metric)
+        # Limit wbi_list_delta_metrics to last_k_measurements
+        if len(wbi_list_delta_metrics[sensitivity_pointer]) > fic_config["last_k"]:
+            wbi_list_delta_metrics[sensitivity_pointer].pop(0)
+        # Remove bit from list
+        wbi_lists[sensitivity_pointer].pop(0)
+        num_bits_flipped += 1
 
-        curr_fi_start_time = time.time()
-        #STEP: Flip the desired bit(s) in the "original" model to make it "faulty"
-        fmodel.explicitly_flip_bits([bit_i])
-
-        #STEP: Compute and save the provided metric for the faulty model
-        y_pred_fault = fmodel.model.predict(fic_config["X_test"], verbose=0)
-        curr_fi_time = time.time() - curr_fi_start_time
-        fi_times.append(curr_fi_time)
-        metric_value = fic_config["eval_metric_func"](y_pred, y_pred_fault)
-        metric.append((bit_i, metric_value))
-
-        #STEP: Add latest metric value to result log
-        print(metric[-1], file=fic_log)
-        fic_log.flush()
-
-        #STEP: Add alert to info log if alert conditions satisfied
-        if fic_config["alert_func"](metric[0][1], metric_value):
-            alert_str  = f"[fic] ALERT: {fic_config['alert_func'].__name__} returned {True} on current OM, FM metric values\n"
-            alert_str += f"[fic]   |  : OM Metric Value  : {metric[0][1]}\n"
-            alert_str += f"[fic]   |  : FM Metric Value  : {metric_value}\n"
-            alert_str += f"[fic]  END : Bit Flip Location: {bit_i} (global-bit-index)\n"
-            print(alert_str, file=fic_log_info)
-            alerts.append(bit_i)
-            fic_log_info.flush()
-
-        fmodel.explicitly_reset_bits([bit_i])
-
-    avg_fi_time = np.mean(fi_times)
-    print(f"[fic] Average time per bit flip: {avg_fi_time}", file=fic_log_info)
-    print(f"[fic] Average time per bit flip: {avg_fi_time}")
+    assert num_bits_flipped == fmodel.num_model_param_bits
 
     #STEP: Print final tool and date/time info to fic log files
     fic_t_end = time.time()
@@ -286,6 +273,97 @@ def fic(fic_config):
     }
     with open(fic_pickle_fp, "wb") as fo:
         pickle.dump(fic_data, fo)
+
+
+###################################################################################################
+
+
+def flip_bit(fic_config, bit_i):
+    """
+    Flip a bit in the model and compute the evaluation metric and log.
+    Return metric of faulty model.
+    """
+    fmodel = fic_config["fmodel"]
+    metric = fic_config["metric"]
+    fic_log = fic_config["fic_log"]
+    fic_log_info = fic_config["fic_log_info"]
+
+    #STEP: Flip the desired bit(s) in the "original" model to make it "faulty"
+    fmodel.explicitly_flip_bits([bit_i])
+
+    #STEP: Compute and save the provided metric for the faulty model
+    y_pred_fault = fmodel.model.predict(fic_config["X_test"], verbose=0)
+    metric_value = fic_config["eval_metric_func"](fic_config["y_pred"], y_pred_fault)
+    metric.append((bit_i, metric_value))
+
+    #STEP: Add latest metric value to result log
+    print(metric[-1], file=fic_log)
+    fic_log.flush()
+
+    #STEP: Add alert to info log if alert conditions satisfied
+    if fic_config["alert_func"](metric[0][1], metric_value):
+        alert_str  = f"[fic] ALERT: {fic_config['alert_func'].__name__} returned {True} on current OM, FM metric values\n"
+        alert_str += f"[fic]   |  : OM Metric Value  : {metric[0][1]}\n"
+        alert_str += f"[fic]   |  : FM Metric Value  : {metric_value}\n"
+        alert_str += f"[fic]  END : Bit Flip Location: {bit_i} (global-bit-index)\n"
+        print(alert_str, file=fic_log_info)
+        fic_config["alerts"].append(bit_i)
+        fic_log_info.flush()
+
+    fmodel.explicitly_reset_bits([bit_i])
+    return metric_value
+
+
+###################################################################################################
+
+def probe_bit_lists(fic_config, wbi_lists, wbi_list_delta_metrics):
+    """
+    PrioriFI helper function
+
+    Flip first bit in each non-empty list. Return number of bits flipped.
+    """
+    num_bits_flipped = 0
+    # Flip first bit in each list
+    for i, wbi_list in enumerate(wbi_lists):
+        if len(wbi_list) == 0:
+            continue
+        bit_idx = wbi_list[0]
+        # print(f"Flipping bit {bit_idx}")
+        delta_metric = flip_bit(fic_config, bit_idx)
+        wbi_list_delta_metrics[i].append(delta_metric)
+        # Remove bit from list
+        wbi_list.pop(0)
+        num_bits_flipped += 1
+    return num_bits_flipped
+
+###################################################################################################
+
+def compute_sensitivity_pointer(wbi_lists, wbi_list_delta_metrics, last_k_measurements):
+    """
+    PrioriFI helper function
+
+    Given a list of lists of bit indices, compute the sensitivity pointer of 
+    which list to flip next.
+    """
+    # Compute median of last k delta metrics for each list
+    last_delta_metrics = []
+    for i in range(len(wbi_lists)):
+        if len(wbi_lists[i]) >= last_k_measurements:
+            # Take the median of the last k delta metric measurements
+            last_delta_metrics.append(np.median(wbi_list_delta_metrics[i][-last_k_measurements:]))
+        else: # Take the last delta metric (or average?)
+            last_delta_metrics.append(np.mean(wbi_list_delta_metrics[i]))
+    # last_delta_metrics = [wbi_list_delta_metrics[i][-1] for i in range(len(wbi_lists))]
+    # print(f"last_delta_metrics = {last_delta_metrics}")
+    # Take negative to sort in descending order
+    sensivity_metric_argsort = np.argsort(-np.array(last_delta_metrics)) 
+    # print(f"sensivity_metric_argsort = {sensivity_metric_argsort}")
+    for i in range(len(sensivity_metric_argsort)):
+        if len(wbi_lists[sensivity_metric_argsort[i]]) > 0:
+            sensitivity_pointer = sensivity_metric_argsort[i]
+            # print(f"Found sensitivity_pointer: {sensitivity_pointer}")
+            break
+    return sensitivity_pointer
 
 ###################################################################################################
 
@@ -368,12 +446,14 @@ def main(args):
 
     #STEP: Compute Hessian parameter ranking
     hess = HessianMetrics(
-        fic_config["model"], 
+        model, 
         tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True), 
         X_test, 
         y_test,
         batch_size=1024,
     )
+
+    # TODO: compare Hessian ranking with priorifi notebook's ranking
         
     # Hessian model-wide sensitivity ranking
     eigenvalues, eigenvectors = hess.top_k_eigenvalues(k=8, max_iter=500, rank_BN=False)
@@ -405,6 +485,7 @@ def main(args):
         "bit_width" : args.bit_width,
         "layer_precision_info" : layer_precision_info,
         "hess_ranking" : hess_ranking,
+        "last_k": args.last_k,
     }
 
     #STEP: Launch fic
@@ -460,6 +541,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--bit_width",
         type=int,
+        default=None,
         help="Bitwidth of the weights and biases (assuming single precision)",
     )
     parser.add_argument(
@@ -467,6 +549,12 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="List of tuples describing precision information for each layer (assuming mixed precision)",
+    )
+    parser.add_argument(
+        "--last_k",
+        type=int,
+        default=5,
+        help="Number of last measurements to use for sensitivity pointer calculation",
     )
 
     args = parser.parse_args()
