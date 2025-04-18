@@ -453,8 +453,6 @@ def main(args):
         batch_size=1024,
     )
 
-    # TODO: compare Hessian ranking with priorifi notebook's ranking
-        
     # Hessian model-wide sensitivity ranking
     eigenvalues, eigenvectors = hess.top_k_eigenvalues(k=8, max_iter=500, rank_BN=False)
 
@@ -471,6 +469,7 @@ def main(args):
     args.fic_range_stop  = nmpb if args.fic_range_stop  is None else args.fic_range_stop
     args.fic_range_step  = 1    if args.fic_range_step  is None else args.fic_range_step
 
+    model = load_model(config, pretrained_model=args.pretrained_model)
 
     #STEP: Create fault injection campaign (fic) configuration
     fic_config = {
