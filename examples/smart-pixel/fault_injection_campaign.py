@@ -240,7 +240,7 @@ def fic(fic_config):
         wbi_lists[sensitivity_pointer].pop(0)
         num_bits_flipped += 1
 
-    assert num_bits_flipped == fmodel.num_model_param_bits
+    assert num_bits_flipped == fmodel.num_model_param_bits, f"num_bits_flipped = {num_bits_flipped} != fmodel.num_model_param_bits = {fmodel.num_model_param_bits}"
 
     #STEP: Print final tool and date/time info to fic log files
     fic_t_end = time.time()
@@ -453,15 +453,12 @@ def main(args):
         batch_size=1024,
     )
 
-    # TODO: compare Hessian ranking with priorifi notebook's ranking
-        
     # Hessian model-wide sensitivity ranking
     eigenvalues, eigenvectors = hess.top_k_eigenvalues(k=8, max_iter=500, rank_BN=False)
 
     hess_ranking, _ = hess.hessian_ranking_general(
         eigenvectors, eigenvalues=eigenvalues, k=8,
     )
-
     #STEP: Load the dataset to be used for fic evaluation
     x_test_pred_correct, _ = gen_smart_pix_0mispredicts_dataset(model, X_test, y_test)
 
