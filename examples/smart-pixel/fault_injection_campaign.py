@@ -202,10 +202,6 @@ def fic(fic_config):
     #STEP: Add latest metric value to result log
     print(metric[-1], file=fic_log)
     
-    # print(f"fic_range = {fic_config['fic_range']}")
-    # range_list = range(*fic_config['fic_range'])
-    # print(f"Range list: {range_list}")
-
     # Convert Hessian-ranked parameters into bit index lists
     wbi_lists = convert_params_into_bit_lists(
         fic_config["hess_ranking"],
@@ -223,6 +219,7 @@ def fic(fic_config):
     fic_config["fic_log_info"] = fic_log_info
     fic_config["alerts"] = alerts
 
+    #STEP: Begin PrioriFI algorithm
     curr_num_bits_flipped = probe_bit_lists(fic_config, wbi_lists, wbi_list_delta_metrics)
     num_bits_flipped += curr_num_bits_flipped
 
@@ -257,7 +254,6 @@ def fic(fic_config):
 
     #STEP: Save fic data as pickle file
     fic_data = {
-        # "fic_config"                 : fic_config,
         "arg --config"               : fic_config["load_model_tuple"][0],
         "arg --pretrained-model"     : fic_config["load_model_tuple"][1],
         "arg --model-id"             : fic_config["model_id"],
