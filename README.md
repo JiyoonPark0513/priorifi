@@ -18,6 +18,6 @@ conda activate edge-nns
 ## Example
 We present an example of how to use PrioriFI on three models (small, medium, and large) trained on the [Smart Pixel](https://iopscience.iop.org/article/10.1088/2632-2153/ad6a00/meta) dataset, representing high-energy physics data.
 
-See the example [here](examples/smart-pixel/)
+See the example [here](examples/smart-pixel/).
 
 
